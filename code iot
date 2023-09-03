@@ -1,0 +1,133 @@
+import utime
+from servo import Servo
+import network
+import machine
+import time
+from umqtt.simple import MQTTClient
+import ubinascii
+from machine import I2C, Pin
+from pico_i2c_lcd import I2cLcd
+import _thread
+
+# Konfigurasi WiFi
+SSID = "smkm"
+PASSWORD = "imogiri77"
+
+# Konfigurasi MQTT
+MQTT_BROKER = "broker.mqtt-dashboard.com"
+MQTT_PORT = 1883
+MQTT_CLIENT_ID = ubinascii.hexlify(machine.unique_id())
+MQTT_TOPIC = b"uchiha7xz"
+
+# Konfigurasi sensor ultrasonik
+TRIG_PIN = 14
+ECHO_PIN = 15
+
+# Konfigurasi servo
+SERVO_PIN = 13
+s1 = Servo(SERVO_PIN)  # Servo pin is connected to GP13
+
+# Inisialisasi objek WiFi
+wifi = network.WLAN(network.STA_IF)
+
+# Aktifkan WiFi
+wifi.active(True)
+
+# Coba untuk terhubung ke jaringan WiFi
+wifi.connect(SSID, PASSWORD)
+
+# Tunggu sampai terhubung atau maksimal 30 detik
+timeout = 30  # Maksimal waktu tunggu dalam detik
+while not wifi.isconnected() and timeout > 0:
+    time.sleep(1)
+    timeout -= 1
+
+def servo_Map(x, in_min, in_max, out_min, out_max):
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+def move_servo_smooth(start_angle, end_angle, duration, steps=50):
+    for i in range(steps + 1):
+        angle = start_angle + (end_angle - start_angle) * (i / steps)
+        servo_Angle(angle)
+        utime.sleep(duration / steps)
+
+def servo_Angle(angle):
+    if angle < 0:
+        angle = 0
+    if angle > 180:
+        angle = 180
+    s1.goto(round(servo_Map(angle, 0, 180, 0, 1024)))  # Convert range value to angle value
+
+# Fungsi untuk mengukur jarak menggunakan sensor ultrasonik
+def measure_distance():
+    trig = machine.Pin(TRIG_PIN, machine.Pin.OUT)
+    echo = machine.Pin(ECHO_PIN, machine.Pin.IN)
+    
+    # Kirim sinyal ultrasonik
+    trig.value(0)
+    time.sleep_us(2)
+    trig.value(1)
+    time.sleep_us(10)
+    trig.value(0)
+    
+    # Baca waktu tiba-tiba pulsa balik
+    while echo.value() == 0:
+        pulse_start = time.ticks_us()
+    while echo.value() == 1:
+        pulse_end = time.ticks_us()
+        
+    # Hitung jarak berdasarkan waktu tiba-tiba pulsa balik
+    pulse_duration = time.ticks_diff(pulse_end, pulse_start)
+    distance = (pulse_duration * 0.0343) / 2  # Mengubah waktu menjadi jarak dalam cm
+    return distance
+
+# Inisialisasi klien MQTT
+client = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER, port=MQTT_PORT)
+
+# Coba untuk terhubung ke broker MQTT
+client.connect()
+
+i2c = I2C(0, sda=Pin(8), scl=Pin(9), freq=400000)
+I2C_ADDR = i2c.scan()[0]
+lcd = I2cLcd(i2c, I2C_ADDR, 2, 16)
+
+def update_ultrasonic_data():
+    while True:
+        distance = measure_distance()
+
+        if distance > 16:
+            payload = b"1"
+        elif 12 <= distance <= 16:
+            payload = b"2"
+        elif distance < 12:
+            payload = b"3"
+
+        print("Jarak:", distance, "cm - Payload:", payload.decode())
+
+        # Kirim data melalui MQTT
+        client.publish(MQTT_TOPIC, payload)
+
+        lcd.move_to(0, 0)
+        lcd.putstr("SMK Muhammadiyah")
+
+        lcd.move_to(0, 1)
+        lcd.putstr("    Imogiri")
+
+        time.sleep(0.5)  # Tunggu 0.1 detik sebelum mengukur ulang
+
+# Memulai thread untuk update_ultrasonic_data
+import _thread
+_thread.start_new_thread(update_ultrasonic_data, ())
+
+try:
+    while True:
+        print("Moving servo from 0 to 90 degrees...")
+        move_servo_smooth(160, 10, 2)  # Move servo from 0 to 90 degrees in 2 seconds
+        time.sleep(1)  # Delay for 1 second
+        
+        print("Moving servo from 90 to 0 degrees...")
+        move_servo_smooth(10, 160, 2)  # Move servo from 90 to 0 degrees in 2 seconds
+        time.sleep(5)  # Delay for 5 seconds
+        
+finally:
+    client.disconnect()
